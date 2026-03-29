@@ -1,7 +1,1 @@
 session	commit	tokens_per_sec	bpb	status	description
-mar28	25ebf75	2304.3	0.9752	keep	baseline serial forward pass
-mar28	4d96eeb	2255.3	0.9752	discard	batch_size=8 batched forward pass
-mar28	c55fda1	2282.4	0.9752	discard	batch_size=4 batched forward pass
-mar28	f92fbd1	2311.6	0.9753	keep	torch.compile reduce-overhead mode
-mar28	348b8d8	2201.0	0.9753	discard	torch.compile + batch_size=8 batched forward
-mar28	96c2b67	2427.6	0.9753	keep	pre-allocated input buffer + torch.compile
