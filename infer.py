@@ -51,8 +51,17 @@ def _make_decode_fn(model):
     _decode_compiled = decode
 
 
+_attn_set = False
+
 def infer(model, tokenizer, prompts: list[list[int]], max_new_tokens: int) -> list[list[int]]:
     """Greedy decode: uncompiled prefill + compiled decode with CUDA graphs."""
+    global _attn_set
+    if not _attn_set:
+        model.config._attn_implementation = "eager"
+        for layer in model.model.layers:
+            layer.self_attn.config._attn_implementation = "eager"
+        _attn_set = True
+
     device = next(model.parameters()).device
     input_ids = torch.tensor(prompts, dtype=torch.long, device=device)
     batch_size = input_ids.shape[0]
