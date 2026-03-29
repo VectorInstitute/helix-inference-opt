@@ -24,47 +24,55 @@ BATCH_SIZE = 1
 
 # INFERENCE STRATEGY — modify this section
 
-_compiled = False
+_decode_step = None
+_prefill_step = None
 
 
-def _compile_model(model):
-    """Compile model for default mode."""
-    global _compiled
-    if not _compiled:
-        model.forward = torch.compile(model.forward, mode="default", fullgraph=True)
-        _compiled = True
+def _setup(model):
+    """One-time: compile prefill and decode step functions separately."""
+    global _decode_step, _prefill_step
+
+    if _decode_step is not None:
+        return
+
+    @torch.compile(mode="default", fullgraph=True)
+    def prefill(input_ids):
+        outputs = model(input_ids, use_cache=True, return_dict=False)
+        logits = outputs[0]
+        past_kv = outputs[1]
+        next_tok = logits[:, -1, :].argmax(dim=-1)
+        return next_tok, past_kv
+
+    @torch.compile(mode="default", fullgraph=True)
+    def decode(token, past_kv):
+        outputs = model(token.unsqueeze(1), past_key_values=past_kv, use_cache=True, return_dict=False)
+        logits = outputs[0]
+        new_past_kv = outputs[1]
+        next_tok = logits[:, -1, :].argmax(dim=-1)
+        return next_tok, new_past_kv
+
+    _prefill_step = prefill
+    _decode_step = decode
 
 
 def infer(model, tokenizer, prompts: list[list[int]], max_new_tokens: int) -> list[list[int]]:
-    """Manual greedy decode with torch.compile and return_dict=False to reduce overhead."""
-    _compile_model(model)
+    """Manual greedy decode with compiled prefill and decode steps."""
+    _setup(model)
 
     device = next(model.parameters()).device
     input_ids = torch.tensor(prompts, dtype=torch.long, device=device)
     batch_size = input_ids.shape[0]
-    prompt_len = input_ids.shape[1]
 
     generated = torch.zeros(batch_size, max_new_tokens, dtype=torch.long, device=device)
 
     with torch.inference_mode():
-        # Prefill - return_dict=False returns tuple
-        outputs = model(input_ids, use_cache=True, return_dict=False)
-        logits = outputs[0]
-        past_key_values = outputs[1]
-        next_token = logits[:, -1, :].argmax(dim=-1)
+        # Prefill
+        next_token, past_kv = _prefill_step(input_ids)
         generated[:, 0] = next_token
 
         # Decode
         for i in range(1, max_new_tokens):
-            outputs = model(
-                next_token.unsqueeze(1),
-                past_key_values=past_key_values,
-                use_cache=True,
-                return_dict=False,
-            )
-            logits = outputs[0]
-            past_key_values = outputs[1]
-            next_token = logits[:, -1, :].argmax(dim=-1)
+            next_token, past_kv = _decode_step(next_token, past_kv)
             generated[:, i] = next_token
 
     return [generated[b].tolist() for b in range(batch_size)]
