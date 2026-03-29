@@ -35,7 +35,7 @@ if not torch.cuda.is_available():
 
 MODEL_ID = os.environ.get("HELIX_MODEL", "Qwen/Qwen2.5-0.5B-Instruct")
 CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "autoresearch")
-TIME_BUDGET = int(os.environ.get("HELIX_TIME_BUDGET", "300"))
+TIME_BUDGET = int(os.environ["HELIX_TIME_BUDGET"])
 PROMPT_TOKENS = int(os.environ.get("HELIX_PROMPT_TOKENS", "128"))     # context length per prompt
 MAX_NEW_TOKENS = int(os.environ.get("HELIX_MAX_NEW_TOKENS", "256"))   # tokens to generate per prompt
 BPB_CHUNKS = int(os.environ.get("HELIX_BPB_CHUNKS", "100"))           # chunks for BPB quality guard
