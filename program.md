@@ -79,7 +79,7 @@ After `uv run infer.py` completes, the script prints a machine-readable summary:
 tokens_per_sec:    1240.5
 bpb:               0.9753
 prompts_processed: 620
-time_elapsed:      300.1
+time_elapsed:      60.1
 ```
 
 Extract metrics with:
