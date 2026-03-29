@@ -9,7 +9,12 @@ Usage:
     uv run infer.py
 """
 
+import os
+# Optimize CUDA memory allocator
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 import torch
+from transformers import StaticCache
 from prepare import evaluate
 from rich.console import Console
 from rich.panel import Panel
@@ -23,38 +28,80 @@ BATCH_SIZE = 1
 
 
 # INFERENCE STRATEGY — modify this section
-def infer(model, tokenizer, prompts: list[list[int]], max_new_tokens: int) -> list[list[int]]:  # type: ignore[no-untyped-def]
-    """Autoregressive generation. Returns only the newly generated token ids.
 
-    Parameters
-    ----------
-    model :
-        The causal LM (already on CUDA, bfloat16).
-    tokenizer :
-        The model's tokenizer.
-    prompts : list[list[int]]
-        List of prompt token-id sequences, all the same length.
-    max_new_tokens : int
-        Number of new tokens to generate per prompt.
+_decode_compiled = None
+_setup_done = False
+_device = None
 
-    Returns
-    -------
-    list[list[int]]
-        List of lists, each containing only the generated (non-prompt) token ids.
-    """
-    device = next(model.parameters()).device
-    input_ids = torch.tensor(prompts, dtype=torch.long, device=device)
+
+def _setup(model):
+    """One-time setup: eager attention + compile decode."""
+    global _decode_compiled, _setup_done, _device
+    if _setup_done:
+        return
+    _setup_done = True
+
+    _device = next(model.parameters()).device
+
+    # Use eager attention (faster for batch=1 single-token decode)
+    model.config._attn_implementation = "eager"
+    for layer in model.model.layers:
+        layer.self_attn.config._attn_implementation = "eager"
+
+    @torch.compile(mode="max-autotune", fullgraph=True)
+    def decode(token, cache_position, past_kv):
+        out = model(
+            token,
+            cache_position=cache_position,
+            past_key_values=past_kv,
+            use_cache=True,
+            return_dict=False,
+        )
+        return out[0][:, -1, :].argmax(dim=-1), out[1]
+
+    _decode_compiled = decode
+
+
+def infer(model, tokenizer, prompts: list[list[int]], max_new_tokens: int) -> list[list[int]]:
+    """Greedy decode: uncompiled prefill + CUDA graph decode, eager attention."""
+    _setup(model)
+
+    input_ids = torch.tensor(prompts, dtype=torch.long, device=_device)
+    batch_size = input_ids.shape[0]
     prompt_len = input_ids.shape[1]
 
-    with torch.inference_mode():
-        output_ids = model.generate(
-            input_ids,
-            max_new_tokens=max_new_tokens,
-            do_sample=False,
-            use_cache=True,
-        )
+    cache = StaticCache(
+        model.config,
+        max_batch_size=batch_size,
+        max_cache_len=prompt_len + max_new_tokens,
+        dtype=model.dtype,
+        device=_device,
+    )
 
-    return [out[prompt_len:].tolist() for out in output_ids]
+    generated = torch.zeros(batch_size, max_new_tokens, dtype=torch.long, device=_device)
+
+    with torch.inference_mode():
+        # Prefill (uncompiled — needed for mark_static_address)
+        cache_position = torch.arange(prompt_len, device=_device, dtype=torch.long)
+        out = model(input_ids, cache_position=cache_position, past_key_values=cache,
+                    use_cache=True, return_dict=False)
+        next_token = out[0][:, -1, :].argmax(dim=-1)
+        past_kv = out[1]
+        generated[:, 0] = next_token
+
+        # Decode with CUDA graphs
+        cache_pos = torch.zeros(1, device=_device, dtype=torch.long)
+        base = prompt_len
+        for i in range(1, max_new_tokens):
+            cache_pos.fill_(base + i - 1)
+            torch.compiler.cudagraph_mark_step_begin()
+            next_token, past_kv = _decode_compiled(
+                next_token.unsqueeze(1), cache_pos, past_kv
+            )
+            next_token = next_token.clone()
+            generated[:, i] = next_token
+
+    return [generated[b].tolist() for b in range(batch_size)]
 
 
 # Entry point (do not modify)
