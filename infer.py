@@ -23,38 +23,44 @@ BATCH_SIZE = 1
 
 
 # INFERENCE STRATEGY — modify this section
-def infer(model, tokenizer, prompts: list[list[int]], max_new_tokens: int) -> list[list[int]]:  # type: ignore[no-untyped-def]
-    """Autoregressive generation. Returns only the newly generated token ids.
 
-    Parameters
-    ----------
-    model :
-        The causal LM (already on CUDA, bfloat16).
-    tokenizer :
-        The model's tokenizer.
-    prompts : list[list[int]]
-        List of prompt token-id sequences, all the same length.
-    max_new_tokens : int
-        Number of new tokens to generate per prompt.
+_compiled = False
 
-    Returns
-    -------
-    list[list[int]]
-        List of lists, each containing only the generated (non-prompt) token ids.
-    """
+
+def _compile_model(model):
+    """Apply torch.compile to the model forward pass."""
+    global _compiled
+    if not _compiled:
+        model.forward = torch.compile(model.forward, mode="default", fullgraph=True)
+        _compiled = True
+
+
+def infer(model, tokenizer, prompts: list[list[int]], max_new_tokens: int) -> list[list[int]]:
+    """Manual greedy decode loop with torch.compile."""
+    _compile_model(model)
+
     device = next(model.parameters()).device
     input_ids = torch.tensor(prompts, dtype=torch.long, device=device)
+    batch_size = input_ids.shape[0]
     prompt_len = input_ids.shape[1]
 
-    with torch.inference_mode():
-        output_ids = model.generate(
-            input_ids,
-            max_new_tokens=max_new_tokens,
-            do_sample=False,
-            use_cache=True,
-        )
+    generated = torch.zeros(batch_size, max_new_tokens, dtype=torch.long, device=device)
 
-    return [out[prompt_len:].tolist() for out in output_ids]
+    with torch.inference_mode():
+        # Prefill: process the full prompt
+        outputs = model(input_ids, use_cache=True)
+        next_token = outputs.logits[:, -1, :].argmax(dim=-1)
+        generated[:, 0] = next_token
+        past_key_values = outputs.past_key_values
+
+        # Decode: one token at a time
+        for i in range(1, max_new_tokens):
+            outputs = model(next_token.unsqueeze(1), past_key_values=past_key_values, use_cache=True)
+            next_token = outputs.logits[:, -1, :].argmax(dim=-1)
+            generated[:, i] = next_token
+            past_key_values = outputs.past_key_values
+
+    return [generated[b].tolist() for b in range(batch_size)]
 
 
 # Entry point (do not modify)
