@@ -21,28 +21,18 @@ not teacher-forced perplexity evaluation.
 
 ## Experimentation
 
-Each experiment runs for a **fixed time budget of 5 minutes** (wall clock, excluding model loading ~30s).
+Each experiment runs for a **fixed time budget of 1 minute** (wall clock, excluding model loading ~30s).
 
 **What you CAN do:**
 
-- Modify `infer.py` freely. Any generation-time technique is in scope:
-  - Larger batch sizes (amortize overhead across sequences)
-  - `torch.compile` with `mode="reduce-overhead"` or `"max-autotune"`
-  - Flash Attention 2 (already supported by the model if using a recent transformers)
-  - Static KV cache (`transformers.StaticCache`) to eliminate dynamic allocations
-  - `model.generate()` configuration: `temperature`, `do_sample`, `repetition_penalty`, etc.
-    (quality guard will catch any correctness regressions)
-  - Speculative decoding with a draft model (must fit in VRAM alongside the main model)
-  - Quantization: `torch.quantization`, bitsandbytes int8/int4, or torch `int8` linear
-  - Custom CUDA kernels
-
-- There are no prescribed approaches. Reason from first principles.
+- Modify `infer.py` freely. There are no prescribed approaches. Reason from first principles.
 
 **What you CANNOT do:**
 
 - Modify `prepare.py`. It owns the evaluation harness and BPB quality guard. It is read-only.
 - Fine-tune or modify the model weights.
 - Install new packages beyond those in `pyproject.toml`.
+- Tune hyperparameters such as batch size, temperature, or repetition penalty.
 
 ## Harness phases
 
@@ -52,7 +42,7 @@ Each run of `uv run infer.py` proceeds in three phases:
    quantization initialization, or any other lazy setup.
 2. **BPB quality guard** — teacher-forced eval on 100 fixed WikiText-2 test chunks.
    Runs *after* warmup so quantization effects are reflected. Guards against quality regression.
-3. **Generation benchmark** — autoregressive generation for 5 minutes.
+3. **Generation benchmark** — autoregressive generation for 1 minute.
    `tokens_per_sec` counts only output (non-prompt) tokens.
 
 ## infer_fn signature
@@ -72,7 +62,7 @@ All prompts in a batch are the same length, so **no padding is needed**.
 
 **Primary: `tokens_per_sec` (maximize)**
 
-Output tokens generated per wall-clock second during the 5-minute generation benchmark.
+Output tokens generated per wall-clock second during the 1-minute generation benchmark.
 
 **Quality guard: `bpb` (must not degrade)**
 
@@ -138,7 +128,7 @@ LOOP FOREVER:
 8. If `tokens_per_sec` improved AND `bpb` did not degrade: **keep** (the commit stays).
 9. Otherwise: **discard** (`git reset --hard HEAD~1`).
 
-**Timeout:** If a run exceeds 10 minutes total, kill it (`kill $(cat run.pid)`) and treat as crash.
+**Timeout:** If a run exceeds 5 minutes total, kill it (`kill $(cat run.pid)`) and treat as crash.
 
 **Simplicity:** All else equal, simpler code that achieves the same throughput is preferred.
 

@@ -27,7 +27,7 @@ metrics:
     max_degradation: 0.01
   evaluate:
     command: uv run infer.py
-    timeout_seconds: 300
+    timeout_seconds: 60
     output_format: pattern
     patterns:
       primary: '^tokens_per_sec:\s+([\d.]+)'

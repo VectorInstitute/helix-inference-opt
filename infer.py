@@ -4,8 +4,6 @@ Agent instructions:
 - Modify the INFERENCE STRATEGY section freely.
 - Goal: maximize ``tokens_per_sec`` (output tokens generated per second).
 - Baseline: greedy decoding with model.generate(), batch_size=1.
-- Ideas: larger batch sizes, torch.compile, flash attention, speculative
-         decoding, quantization, custom CUDA kernels, static KV cache, etc.
 
 Usage:
     uv run infer.py
@@ -20,7 +18,7 @@ from rich.table import Table
 
 console = Console()
 
-# Hyperparameters (edit freely)
+# Hyperparameters (do not edit)
 BATCH_SIZE = 1
 
 
@@ -28,14 +26,20 @@ BATCH_SIZE = 1
 def infer(model, tokenizer, prompts: list[list[int]], max_new_tokens: int) -> list[list[int]]:  # type: ignore[no-untyped-def]
     """Autoregressive generation. Returns only the newly generated token ids.
 
-    Args:
-        model: The causal LM (already on CUDA, bfloat16).
-        tokenizer: The model's tokenizer.
-        prompts: List of prompt token-id sequences, all the same length.
-        max_new_tokens: Number of new tokens to generate per prompt.
+    Parameters
+    ----------
+    model :
+        The causal LM (already on CUDA, bfloat16).
+    tokenizer :
+        The model's tokenizer.
+    prompts : list[list[int]]
+        List of prompt token-id sequences, all the same length.
+    max_new_tokens : int
+        Number of new tokens to generate per prompt.
 
     Returns
     -------
+    list[list[int]]
         List of lists, each containing only the generated (non-prompt) token ids.
     """
     device = next(model.parameters()).device

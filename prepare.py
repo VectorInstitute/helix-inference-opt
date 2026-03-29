@@ -65,8 +65,12 @@ def load_model_and_tokenizer():  # type: ignore[no-untyped-def]
 def load_generation_prompts(tokenizer) -> list[list[int]]:  # type: ignore[no-untyped-def]
     """Load WikiText-2 validation set as fixed-length generation prompts.
 
-    Returns a list of token-id lists, each exactly PROMPT_TOKENS long.
     All prompts are the same length so batching requires no padding.
+
+    Returns
+    -------
+    list[list[int]]
+        Token-id lists, each exactly PROMPT_TOKENS long.
     """
     dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="validation", cache_dir=CACHE_DIR)
     full_text = "\n\n".join(row["text"] for row in dataset if row["text"].strip())
@@ -80,8 +84,12 @@ def load_generation_prompts(tokenizer) -> list[list[int]]:  # type: ignore[no-un
 def load_bpb_chunks(tokenizer) -> list[dict]:  # type: ignore[no-untyped-def]
     """Load the first BPB_CHUNKS chunks of WikiText-2 test set for quality guard.
 
-    Returns a list of dicts with keys ``ids`` (list[int]) and ``utf8_bytes`` (int).
     This set is fixed and never changes so BPB comparisons across experiments are valid.
+
+    Returns
+    -------
+    list[dict]
+        Dicts with keys ``ids`` (list[int]) and ``utf8_bytes`` (int).
     """
     dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="test", cache_dir=CACHE_DIR)
     full_text = "\n\n".join(row["text"] for row in dataset if row["text"].strip())
@@ -137,12 +145,16 @@ def evaluate(infer_fn, batch_size: int = 1) -> dict:  # type: ignore[no-untyped-
     3. **Generation benchmark** — autoregressive generation for TIME_BUDGET seconds.
        ``tokens_per_sec`` counts only the newly generated output tokens.
 
-    Args:
-        infer_fn: Callable conforming to the signature above.
-        batch_size: Number of prompts per ``infer_fn`` call.
+    Parameters
+    ----------
+    infer_fn : callable
+        Callable conforming to the signature above.
+    batch_size : int
+        Number of prompts per ``infer_fn`` call.
 
     Returns
     -------
+    dict
         Dict with keys ``tokens_per_sec``, ``bpb``, ``prompts_processed``, ``time_elapsed``.
     """
     model, tokenizer = load_model_and_tokenizer()
