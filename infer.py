@@ -28,7 +28,7 @@ _compiled = False
 
 
 def _compile_model(model):
-    """Apply torch.compile to the model forward pass."""
+    """Compile model for default mode."""
     global _compiled
     if not _compiled:
         model.forward = torch.compile(model.forward, mode="default", fullgraph=True)
@@ -36,7 +36,7 @@ def _compile_model(model):
 
 
 def infer(model, tokenizer, prompts: list[list[int]], max_new_tokens: int) -> list[list[int]]:
-    """Manual greedy decode loop with torch.compile."""
+    """Manual greedy decode with torch.compile and return_dict=False to reduce overhead."""
     _compile_model(model)
 
     device = next(model.parameters()).device
@@ -47,18 +47,25 @@ def infer(model, tokenizer, prompts: list[list[int]], max_new_tokens: int) -> li
     generated = torch.zeros(batch_size, max_new_tokens, dtype=torch.long, device=device)
 
     with torch.inference_mode():
-        # Prefill: process the full prompt
-        outputs = model(input_ids, use_cache=True)
-        next_token = outputs.logits[:, -1, :].argmax(dim=-1)
+        # Prefill - return_dict=False returns tuple
+        outputs = model(input_ids, use_cache=True, return_dict=False)
+        logits = outputs[0]
+        past_key_values = outputs[1]
+        next_token = logits[:, -1, :].argmax(dim=-1)
         generated[:, 0] = next_token
-        past_key_values = outputs.past_key_values
 
-        # Decode: one token at a time
+        # Decode
         for i in range(1, max_new_tokens):
-            outputs = model(next_token.unsqueeze(1), past_key_values=past_key_values, use_cache=True)
-            next_token = outputs.logits[:, -1, :].argmax(dim=-1)
+            outputs = model(
+                next_token.unsqueeze(1),
+                past_key_values=past_key_values,
+                use_cache=True,
+                return_dict=False,
+            )
+            logits = outputs[0]
+            past_key_values = outputs[1]
+            next_token = logits[:, -1, :].argmax(dim=-1)
             generated[:, i] = next_token
-            past_key_values = outputs.past_key_values
 
     return [generated[b].tolist() for b in range(batch_size)]
 
