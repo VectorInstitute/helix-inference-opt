@@ -1,6 +1,6 @@
 # inference-opt
 
-Autonomous research into inference throughput for a causal language model.
+Autonomous research into autoregressive generation throughput for a causal language model.
 
 ## Setup
 
@@ -10,32 +10,75 @@ Before starting a session:
 2. Read `prepare.py` to understand the fixed evaluation harness.
 3. Read `infer.py` to understand the current inference strategy.
 
+Requires a single NVIDIA GPU (CUDA). Does not run on CPU or MPS.
+
+## The task
+
+Maximize how fast the model generates text. The harness measures **output tokens per second**
+during autoregressive decoding from WikiText-2 validation prompts (128-token context,
+256 max new tokens). This is real inference — token-by-token generation using the KV cache —
+not teacher-forced perplexity evaluation.
+
 ## Experimentation
 
 Each experiment runs for a **fixed time budget of 5 minutes** (wall clock, excluding model loading ~30s).
 
 **What you CAN do:**
 
-- Modify `infer.py` freely. Any inference-time technique is in scope: batching, quantization,
-  `torch.compile`, custom CUDA kernels, reduced-overhead scheduling, speculative decoding, etc.
+- Modify `infer.py` freely. Any generation-time technique is in scope:
+  - Larger batch sizes (amortize overhead across sequences)
+  - `torch.compile` with `mode="reduce-overhead"` or `"max-autotune"`
+  - Flash Attention 2 (already supported by the model if using a recent transformers)
+  - Static KV cache (`transformers.StaticCache`) to eliminate dynamic allocations
+  - `model.generate()` configuration: `temperature`, `do_sample`, `repetition_penalty`, etc.
+    (quality guard will catch any correctness regressions)
+  - Speculative decoding with a draft model (must fit in VRAM alongside the main model)
+  - Quantization: `torch.quantization`, bitsandbytes int8/int4, or torch `int8` linear
+  - Custom CUDA kernels
+
 - There are no prescribed approaches. Reason from first principles.
 
 **What you CANNOT do:**
 
-- Modify `prepare.py`. It owns the evaluation harness and ground-truth scoring. It is read-only.
-- Fine-tune or modify the model weights. The model is fixed.
+- Modify `prepare.py`. It owns the evaluation harness and BPB quality guard. It is read-only.
+- Fine-tune or modify the model weights.
 - Install new packages beyond those in `pyproject.toml`.
+
+## Harness phases
+
+Each run of `uv run infer.py` proceeds in three phases:
+
+1. **Warmup** — one call to `infer_fn` (not timed). Triggers `torch.compile` JIT,
+   quantization initialization, or any other lazy setup.
+2. **BPB quality guard** — teacher-forced eval on 100 fixed WikiText-2 test chunks.
+   Runs *after* warmup so quantization effects are reflected. Guards against quality regression.
+3. **Generation benchmark** — autoregressive generation for 5 minutes.
+   `tokens_per_sec` counts only output (non-prompt) tokens.
+
+## infer_fn signature
+
+```python
+def infer(
+    model,                        # CausalLM, CUDA, bfloat16
+    tokenizer,
+    prompts: list[list[int]],     # batch_size prompts, all length PROMPT_TOKENS (128)
+    max_new_tokens: int,          # tokens to generate (256)
+) -> list[list[int]]:             # newly generated token ids only (no prompt)
+```
+
+All prompts in a batch are the same length, so **no padding is needed**.
 
 ## Metrics
 
 **Primary: `tokens_per_sec` (maximize)**
 
-WikiText-2 tokens scored per wall-clock second within the 5-minute budget. Pure throughput.
+Output tokens generated per wall-clock second during the 5-minute generation benchmark.
 
 **Quality guard: `bpb` (must not degrade)**
 
-Bits per byte. Measures whether the inference produces correct log-probabilities. If `bpb` rises
-meaningfully from baseline, the experiment is producing wrong scores and must be discarded.
+Bits per byte on the fixed test chunks, computed after warmup. Catches quantization or
+kernel changes that degrade model quality. If `bpb` rises more than 1% from baseline,
+the experiment must be discarded.
 
 ## Output format
 
@@ -43,10 +86,10 @@ After `uv run infer.py` completes, the script prints a machine-readable summary:
 
 ```
 ---
-tokens_per_sec:   1240.5
-bpb:              0.9753
-chunks_processed: 620
-time_elapsed:     300.1
+tokens_per_sec:    1240.5
+bpb:               0.9753
+prompts_processed: 620
+time_elapsed:      300.1
 ```
 
 Extract metrics with:
@@ -75,9 +118,9 @@ Example:
 
 ```
 commit	tokens_per_sec	bpb	status	description
-a1b2c3d	1240.5	0.9753	keep	baseline serial forward pass
-b2c3d4e	2180.3	0.9758	keep	batch_size=8 padded batching
-c3d4e5f	2410.1	1.1200	discard	batch_size=16 bpb degraded
+a1b2c3d	1240.5	0.9753	keep	baseline greedy decode batch_size=1
+b2c3d4e	3180.3	0.9758	keep	batch_size=8 padded batching
+c3d4e5f	4200.1	0.9820	discard	bitsandbytes int8 bpb degraded
 d4e5f6g	0.0	inf	crash	custom kernel OOM
 ```
 

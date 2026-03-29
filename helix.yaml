@@ -1,10 +1,12 @@
 name: inference-opt
-version: 1.0.0
+version: 2.0.0
 domain: AI/ML
 description: >
-  Maximize WikiText-2 inference throughput (tokens/sec) for a causal language model
-  without degrading bits-per-byte (bpb). The agent modifies infer.py freely —
-  batching, quantization, torch.compile, kernel tricks, etc. are all in scope.
+  Maximize autoregressive generation throughput (output tokens/sec) for a causal
+  language model without degrading bits-per-byte (bpb). The agent modifies infer.py
+  freely — batching, torch.compile, flash attention, speculative decoding,
+  static KV cache, quantization, custom CUDA kernels, etc. are all in scope.
+  Requires a single NVIDIA GPU (CUDA only).
 author: amritkrishnan
 
 scope:

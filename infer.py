@@ -2,16 +2,16 @@
 
 Agent instructions:
 - Modify the INFERENCE STRATEGY section freely.
-- Goal: maximize ``tokens_per_sec`` without degrading ``bpb``.
-- Baseline: serial forward pass, one chunk at a time.
-- Ideas: batching, quantization, torch.compile, reduced overhead, etc.
+- Goal: maximize ``tokens_per_sec`` (output tokens generated per second).
+- Baseline: greedy decoding with model.generate(), batch_size=1.
+- Ideas: larger batch sizes, torch.compile, flash attention, speculative
+         decoding, quantization, custom CUDA kernels, static KV cache, etc.
 
 Usage:
     uv run infer.py
 """
 
 import torch
-import torch.nn.functional as F  # noqa: N812
 from prepare import evaluate
 from rich.console import Console
 from rich.panel import Panel
@@ -25,31 +25,32 @@ BATCH_SIZE = 1
 
 
 # INFERENCE STRATEGY — modify this section
-def infer(model, _tokenizer, chunks: list[list[int]]) -> list[float]:  # type: ignore[no-untyped-def]
-    """Compute log-probabilities for a batch of token chunks.
+def infer(model, tokenizer, prompts: list[list[int]], max_new_tokens: int) -> list[list[int]]:  # type: ignore[no-untyped-def]
+    """Autoregressive generation. Returns only the newly generated token ids.
 
     Args:
-        model: The loaded causal LM (do not modify weights).
-        tokenizer: The tokenizer (for reference; not needed for pure logit scoring).
-        chunks: List of token ID lists, each of length CHUNK_TOKENS.
+        model: The causal LM (already on CUDA, bfloat16).
+        tokenizer: The model's tokenizer.
+        prompts: List of prompt token-id sequences, all the same length.
+        max_new_tokens: Number of new tokens to generate per prompt.
 
     Returns
     -------
-        List of floats — the sum of log-probs (nats) for each chunk.
+        List of lists, each containing only the generated (non-prompt) token ids.
     """
-    results = []
-    device = model.device
+    device = next(model.parameters()).device
+    input_ids = torch.tensor(prompts, dtype=torch.long, device=device)
+    prompt_len = input_ids.shape[1]
+
     with torch.inference_mode():
-        for chunk in chunks:
-            ids = torch.tensor([chunk], dtype=torch.long, device=device)
-            logits = model(ids).logits
-            log_probs = F.cross_entropy(
-                logits[:, :-1, :].transpose(1, 2),
-                ids[:, 1:],
-                reduction="none",
-            )
-            results.append(-log_probs.sum().item())
-    return results
+        output_ids = model.generate(
+            input_ids,
+            max_new_tokens=max_new_tokens,
+            do_sample=False,
+            use_cache=True,
+        )
+
+    return [out[prompt_len:].tolist() for out in output_ids]
 
 
 # Entry point (do not modify)
@@ -61,7 +62,7 @@ if __name__ == "__main__":
     table.add_column(style="bold")
     table.add_row("tokens_per_sec", f"[cyan]{results['tokens_per_sec']:.1f}[/cyan]")
     table.add_row("bpb", f"{results['bpb']:.4f}")
-    table.add_row("chunks_processed", str(results["chunks_processed"]))
+    table.add_row("prompts_processed", str(results["prompts_processed"]))
     table.add_row("time_elapsed", f"{results['time_elapsed']:.1f}s")
 
     console.print()
@@ -69,7 +70,7 @@ if __name__ == "__main__":
 
     # Machine-parseable summary for grep in the experiment loop
     print("---")
-    print(f"tokens_per_sec:   {results['tokens_per_sec']:.1f}")
-    print(f"bpb:              {results['bpb']:.4f}")
-    print(f"chunks_processed: {results['chunks_processed']}")
-    print(f"time_elapsed:     {results['time_elapsed']:.1f}")
+    print(f"tokens_per_sec:    {results['tokens_per_sec']:.1f}")
+    print(f"bpb:               {results['bpb']:.4f}")
+    print(f"prompts_processed: {results['prompts_processed']}")
+    print(f"time_elapsed:      {results['time_elapsed']:.1f}")
