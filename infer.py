@@ -26,80 +26,70 @@ BATCH_SIZE = 1
 # INFERENCE STRATEGY — modify this section
 
 _decode_compiled = None
+_setup_done = False
+_device = None
 
 
-def _make_decode_fn(model):
-    """Create and compile the decode step function with reduce-overhead (CUDA graphs)."""
-    global _decode_compiled
-    if _decode_compiled is not None:
+def _setup(model):
+    """One-time setup: eager attention + compile decode."""
+    global _decode_compiled, _setup_done, _device
+    if _setup_done:
         return
+    _setup_done = True
+
+    _device = next(model.parameters()).device
+
+    # Use eager attention (faster for batch=1 single-token decode)
+    model.config._attn_implementation = "eager"
+    for layer in model.model.layers:
+        layer.self_attn.config._attn_implementation = "eager"
 
     @torch.compile(mode="max-autotune", fullgraph=True)
     def decode(token, cache_position, past_kv):
-        outputs = model(
+        out = model(
             token,
             cache_position=cache_position,
             past_key_values=past_kv,
             use_cache=True,
             return_dict=False,
         )
-        logits = outputs[0]
-        new_past_kv = outputs[1]
-        next_tok = logits[:, -1, :].argmax(dim=-1)
-        return next_tok, new_past_kv
+        return out[0][:, -1, :].argmax(dim=-1), out[1]
 
     _decode_compiled = decode
 
 
-_attn_set = False
-
 def infer(model, tokenizer, prompts: list[list[int]], max_new_tokens: int) -> list[list[int]]:
-    """Greedy decode: uncompiled prefill + compiled decode with CUDA graphs."""
-    global _attn_set
-    if not _attn_set:
-        model.config._attn_implementation = "eager"
-        for layer in model.model.layers:
-            layer.self_attn.config._attn_implementation = "eager"
-        _attn_set = True
+    """Greedy decode: uncompiled prefill + CUDA graph decode, eager attention."""
+    _setup(model)
 
-    device = next(model.parameters()).device
-    input_ids = torch.tensor(prompts, dtype=torch.long, device=device)
+    input_ids = torch.tensor(prompts, dtype=torch.long, device=_device)
     batch_size = input_ids.shape[0]
     prompt_len = input_ids.shape[1]
 
-    # Create a fresh static cache for this generation
     cache = StaticCache(
         model.config,
         max_batch_size=batch_size,
         max_cache_len=prompt_len + max_new_tokens,
         dtype=model.dtype,
-        device=device,
+        device=_device,
     )
 
-    generated = torch.zeros(batch_size, max_new_tokens, dtype=torch.long, device=device)
+    generated = torch.zeros(batch_size, max_new_tokens, dtype=torch.long, device=_device)
 
     with torch.inference_mode():
-        # Prefill: uncompiled, triggers lazy cache initialization + mark_static_address
-        cache_position = torch.arange(prompt_len, device=device, dtype=torch.long)
-        outputs = model(
-            input_ids,
-            cache_position=cache_position,
-            past_key_values=cache,
-            use_cache=True,
-            return_dict=False,
-        )
-        logits = outputs[0]
-        past_kv = outputs[1]
-        next_token = logits[:, -1, :].argmax(dim=-1)
+        # Prefill (uncompiled — needed for mark_static_address)
+        cache_position = torch.arange(prompt_len, device=_device, dtype=torch.long)
+        out = model(input_ids, cache_position=cache_position, past_key_values=cache,
+                    use_cache=True, return_dict=False)
+        next_token = out[0][:, -1, :].argmax(dim=-1)
+        past_kv = out[1]
         generated[:, 0] = next_token
 
-        # Set up compiled decode after prefill has initialized the cache
-        _make_decode_fn(model)
-
-        # Decode with CUDA graphs — clone outputs to avoid overwrite
-        cache_pos = torch.zeros(1, device=device, dtype=torch.long)
+        # Decode with CUDA graphs
+        cache_pos = torch.zeros(1, device=_device, dtype=torch.long)
+        base = prompt_len
         for i in range(1, max_new_tokens):
-            cache_pos.fill_(prompt_len + i - 1)
+            cache_pos.fill_(base + i - 1)
             torch.compiler.cudagraph_mark_step_begin()
             next_token, past_kv = _decode_compiled(
                 next_token.unsqueeze(1), cache_pos, past_kv
