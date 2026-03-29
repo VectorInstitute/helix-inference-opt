@@ -9,6 +9,10 @@ Usage:
     uv run infer.py
 """
 
+import os
+# Optimize CUDA memory allocator
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 import torch
 from transformers import StaticCache
 from prepare import evaluate
