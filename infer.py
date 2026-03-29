@@ -10,6 +10,7 @@ Usage:
 """
 
 import torch
+from transformers import StaticCache
 from prepare import evaluate
 from rich.console import Console
 from rich.panel import Panel
@@ -24,55 +25,77 @@ BATCH_SIZE = 1
 
 # INFERENCE STRATEGY — modify this section
 
-_decode_step = None
-_prefill_step = None
+_decode_compiled = None
 
 
-def _setup(model):
-    """One-time: compile prefill and decode step functions separately."""
-    global _decode_step, _prefill_step
-
-    if _decode_step is not None:
+def _make_decode_fn(model):
+    """Create and compile the decode step function with reduce-overhead (CUDA graphs)."""
+    global _decode_compiled
+    if _decode_compiled is not None:
         return
 
-    @torch.compile(mode="default", fullgraph=True)
-    def prefill(input_ids):
-        outputs = model(input_ids, use_cache=True, return_dict=False)
-        logits = outputs[0]
-        past_kv = outputs[1]
-        next_tok = logits[:, -1, :].argmax(dim=-1)
-        return next_tok, past_kv
-
-    @torch.compile(mode="default", fullgraph=True)
-    def decode(token, past_kv):
-        outputs = model(token.unsqueeze(1), past_key_values=past_kv, use_cache=True, return_dict=False)
+    @torch.compile(mode="reduce-overhead", fullgraph=True)
+    def decode(token, cache_position, past_kv):
+        outputs = model(
+            token,
+            cache_position=cache_position,
+            past_key_values=past_kv,
+            use_cache=True,
+            return_dict=False,
+        )
         logits = outputs[0]
         new_past_kv = outputs[1]
         next_tok = logits[:, -1, :].argmax(dim=-1)
         return next_tok, new_past_kv
 
-    _prefill_step = prefill
-    _decode_step = decode
+    _decode_compiled = decode
 
 
 def infer(model, tokenizer, prompts: list[list[int]], max_new_tokens: int) -> list[list[int]]:
-    """Manual greedy decode with compiled prefill and decode steps."""
-    _setup(model)
-
+    """Greedy decode: uncompiled prefill + compiled decode with CUDA graphs."""
     device = next(model.parameters()).device
     input_ids = torch.tensor(prompts, dtype=torch.long, device=device)
     batch_size = input_ids.shape[0]
+    prompt_len = input_ids.shape[1]
+
+    # Create a fresh static cache for this generation
+    cache = StaticCache(
+        model.config,
+        max_batch_size=batch_size,
+        max_cache_len=prompt_len + max_new_tokens,
+        dtype=model.dtype,
+        device=device,
+    )
 
     generated = torch.zeros(batch_size, max_new_tokens, dtype=torch.long, device=device)
 
     with torch.inference_mode():
-        # Prefill
-        next_token, past_kv = _prefill_step(input_ids)
+        # Prefill: uncompiled, triggers lazy cache initialization + mark_static_address
+        cache_position = torch.arange(prompt_len, device=device, dtype=torch.long)
+        outputs = model(
+            input_ids,
+            cache_position=cache_position,
+            past_key_values=cache,
+            use_cache=True,
+            return_dict=False,
+        )
+        logits = outputs[0]
+        past_kv = outputs[1]
+        next_token = logits[:, -1, :].argmax(dim=-1)
         generated[:, 0] = next_token
 
-        # Decode
+        # Set up compiled decode after prefill has initialized the cache
+        _make_decode_fn(model)
+
+        # Decode with CUDA graphs — clone outputs to avoid overwrite
+        cache_pos = torch.zeros(1, device=device, dtype=torch.long)
         for i in range(1, max_new_tokens):
-            next_token, past_kv = _decode_step(next_token, past_kv)
+            cache_pos.fill_(prompt_len + i - 1)
+            torch.compiler.cudagraph_mark_step_begin()
+            next_token, past_kv = _decode_compiled(
+                next_token.unsqueeze(1), cache_pos, past_kv
+            )
+            next_token = next_token.clone()
             generated[:, i] = next_token
 
     return [generated[b].tolist() for b in range(batch_size)]
