@@ -108,8 +108,8 @@ Example:
 
 ```
 commit	tokens_per_sec	bpb	status	description
-a1b2c3d	1240.5	0.9753	keep	baseline greedy decode batch_size=1
-b2c3d4e	3180.3	0.9758	keep	batch_size=8 padded batching
+a1b2c3d	1240.5	0.9753	keep	baseline greedy decode
+b2c3d4e	3180.3	0.9758	keep	torch.compile + static KV cache
 c3d4e5f	4200.1	0.9820	discard	bitsandbytes int8 bpb degraded
 d4e5f6g	0.0	inf	crash	custom kernel OOM
 ```
