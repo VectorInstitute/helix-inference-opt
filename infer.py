@@ -34,7 +34,7 @@ def _make_decode_fn(model):
     if _decode_compiled is not None:
         return
 
-    @torch.compile(mode="reduce-overhead", fullgraph=True)
+    @torch.compile(mode="max-autotune", fullgraph=True)
     def decode(token, cache_position, past_kv):
         outputs = model(
             token,
